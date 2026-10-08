@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CONTROLE 2026</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{font-family:Inter,system-ui,sans-serif}
+.sheet-th{background:#1e4a8a;color:#fff;font-weight:600;font-size:11px;text-transform:uppercase;padding:8px 10px;white-space:nowrap;position:sticky;top:0;z-index:10}
+.sheet-th.sortable{cursor:pointer;user-select:none}
+.sheet-th.sortable:hover{background:#255aa8}
+.sheet-td{padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;font-size:12.5px}
+.zebra:nth-child(even){background:#f8fbff}.zebra:nth-child(odd){background:#fff}.zebra:hover{background:#e0f2fe!important}
+</style>
+</head>
+<body class="bg-[#f1f5f9] text-[13px]">
+<div id="root"></div>
+
+<!-- INJEÇÃO DO Code.gs -->
+<script>/*__DADOS_SERVIDOR__*/try{if(window.__SERVIDOR_DADOS__&&window.__SERVIDOR_DADOS__.length>10){localStorage.setItem("controle_operacional",window.__SERVIDOR_DADOS__);}}catch(e){}</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+const {useState,useMemo,useEffect,useRef} = React;
+const {createRoot} = ReactDOM;
+
+const KEY = "controle_operacional";
+const DRIVE_FILE = "dados.json";
+const BTN_AZUL = "bg-[#1e4a8a] hover:bg-[#255aa8] text-white px-3 py-2 rounded font-semibold text-[12px] cursor-pointer";
+const VAZIO = "__VAZIO__";
+const campoLbl = "text-[11px] font-bold uppercase";
+const campoIn = "w-full border rounded px-3 py-2.5 mt-1 text-[14px]";
+const STATUS_OPC = ["PAGO D","PAGO C","PENDENTE",""];
+function casa(arr,v){ return arr.includes(v) || (arr.includes(VAZIO) && String(v??"").trim()===""); }
+function parseNum(v){ const s=String(v).trim(); if(s==="") return 0; return s.includes(",") ? Number(s.replace(/\./g,"").replace(",",".")) : Number(s); }
+
+// Utils
+function toISO(d){ if(!d) return new Date().toISOString(); if(d.includes("T")) return d; return `${d}T00:00:00`; }
+function diaSemana(d){ try{ return new Intl.DateTimeFormat("pt-BR",{weekday:"long"}).format(new Date(toISO(d))); }catch{return "";} }
+function mesAno(d){ try{ return new Intl.DateTimeFormat("pt-BR",{month:"long",year:"numeric"}).format(new Date(toISO(d))).replace(" de ","/"); }catch{return "";} }
+function fmtBR(d){ try{ return new Date(toISO(d)).toLocaleDateString("pt-BR"); }catch{return d;} }
+function fmtM(v){ return Number(v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
+function newId(){ return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
+
+// Aviso na caixa do topo (ok / info / erro)
+function aviso(txt,tipo){
+  const el=document.getElementById("fb"); if(!el) return;
+  const cor={ok:"bg-emerald-50 border-emerald-200 text-emerald-800",info:"bg-blue-50 border-blue-200 text-blue-800",erro:"bg-rose-50 border-rose-200 text-rose-800"}[tipo]||"";
+  el.textContent=txt; el.className="block border px-3 py-2 rounded text-[12px] mb-3 "+cor;
+  clearTimeout(window.__avT); window.__avT=setTimeout(()=>{el.className="hidden"},tipo==="erro"?8000:4000);
+}
+
+function normaliza(l){
+  const data = toISO(l.data);
+  const cd = Number(l.cd ?? 0);
+  const cont = (l.container||"").trim().toUpperCase();
+  const credito = cd>0?cd:0;
+  const debitos = cd<0?cd:0;
+  return {
+    id: l.id || newId(),
+    descricao: (l.descricao||"").toUpperCase(),
+    parc: String(l.parc||"0"),
+    viagem: (l.viagem||"DINHEIRO").toUpperCase(),
+    container: cont,
+    data,
+    cd,
+    status: (l.status||"").toUpperCase(),
+    dia: diaSemana(data),
+    mes: mesAno(data),
+    credito, debitos, saldo: credito+debitos
+  };
+}
+
+// ===== Ordenação =====
+const COLS_ORD = [["descricao","Descrição"],["parc","Parc"],["viagem","Viagem"],["container","Container"],["data","Data"],["cd","CD"],["status","Status"],["mes","Mês"],["saldo","Saldo"]];
+const ORD_PADRAO = [{col:"data",dir:"desc"}];
+const COLS_NUM = new Set(["cd","saldo"]);
+function cmpCol(x,y,col){
+  if(col==="data"||col==="mes") return new Date(x.data)-new Date(y.data);
+  if(col==="parc") return (parseInt(x.parc)||0)-(parseInt(y.parc)||0);
+  if(COLS_NUM.has(col)) return (Number(x[col])||0)-(Number(y[col])||0);
+  return String(x[col]??"").localeCompare(String(y[col]??""),"pt-BR");
+}
+function resumoOrd(sc){
+  return sc.map(s=>{ const n=(COLS_ORD.find(c=>c[0]===s.col)||[])[1]||s.col; return n+(s.dir==="asc"?" ↑":" ↓"); }).join(" › ");
+}
+
+// ===== Filtro com seleção múltipla =====
+function useFora(ref,fechar){
+  useEffect(()=>{
+    function h(e){ if(ref.current && !ref.current.contains(e.target)) fechar(); }
+    document.addEventListener("mousedown",h); document.addEventListener("touchstart",h);
+    return ()=>{ document.removeEventListener("mousedown",h); document.removeEventListener("touchstart",h); };
+  },[]);
+}
+
+function MultiSelect({label,options:base,value,onChange,vazio=true}){
+  const [open,setOpen]=useState(false);
+  const [q,setQ]=useState("");
+  const ref=useRef(null);
+  useFora(ref,()=>setOpen(false));
+  const options=vazio?[{value:VAZIO,label:"(Vazios)"},...base]:base;
+  const vis=options.filter(o=>o.label.toLowerCase().includes(q.toLowerCase()));
+  const toggle=v=>onChange(value.includes(v)?value.filter(x=>x!==v):[...value,v]);
+  const achou=v=>(options.find(o=>o.value===v)||{}).label ?? v;
+  const txt = value.length===0 ? `TODOS - ${label}` : value.length===1 ? `${label}: ${achou(value[0])}` : `${label}: ${value.length} selecionados`;
+  return React.createElement("div",{ref,className:"relative"},
+    React.createElement("button",{type:"button",onClick:()=>setOpen(!open),className:`w-full border rounded px-2 py-1.5 text-[12px] bg-white flex items-center justify-between gap-2 text-left ${value.length?"border-[#1e4a8a] bg-blue-50 font-semibold":""}`},
+      React.createElement("span",{className:"truncate"},txt),
+      React.createElement("span",{className:"text-[9px]"},open?"▲":"▼")
+    ),
+    open && React.createElement("div",{className:"absolute z-40 mt-1 left-0 min-w-full w-[260px] max-w-[85vw] bg-white border rounded shadow-lg"},
+      React.createElement("div",{className:"p-2 border-b flex flex-col gap-2"},
+        React.createElement("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Buscar...",className:"w-full border rounded px-2 py-1 text-[12px]"}),
+        React.createElement("div",{className:"flex gap-2"},
+          React.createElement("button",{type:"button",onClick:()=>onChange([...new Set([...value,...vis.map(o=>o.value)])]),className:"text-[11px] text-[#1e4a8a] font-semibold"},"Marcar visíveis"),
+          React.createElement("button",{type:"button",onClick:()=>onChange([]),className:"text-[11px] text-rose-600 font-semibold"},"Limpar")
+        )
+      ),
+      React.createElement("div",{className:"max-h-60 overflow-auto"},
+        vis.length===0 && React.createElement("div",{className:"p-3 text-[11px] text-slate-400"},"Nada encontrado"),
+        vis.map(o=>React.createElement("label",{key:o.value===""?"__vazio":o.value,className:"flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-slate-50 cursor-pointer"},
+          React.createElement("input",{type:"checkbox",checked:value.includes(o.value),onChange:()=>toggle(o.value)}),
+          React.createElement("span",null,o.label)
+        ))
+      )
+    )
+  );
+}
+
+// ===== Painel de ordenação =====
+function SortPanel({sortCols,setSortCols}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useFora(ref,()=>setOpen(false));
+  const toggleCol=col=>{
+    if(sortCols.some(s=>s.col===col)) setSortCols(sortCols.filter(s=>s.col!==col));
+    else setSortCols([...sortCols,{col,dir:"asc"}]);
+  };
+  const inverte=col=>setSortCols(sortCols.map(s=>s.col===col?{...s,dir:s.dir==="asc"?"desc":"asc"}:s));
+  return React.createElement("div",{ref,className:"relative"},
+    React.createElement("button",{type:"button",onClick:()=>setOpen(!open),className:BTN_AZUL+" !py-1.5"},`⇅ Ordenar (${sortCols.length})`),
+    open && React.createElement("div",{className:"absolute z-40 mt-1 right-0 w-[300px] max-w-[85vw] bg-white border rounded shadow-lg"},
+      React.createElement("div",{className:"p-2 border-b text-[11px] text-slate-500"},"Marque as colunas na ordem de prioridade e escolha crescente ou decrescente."),
+      React.createElement("div",{className:"max-h-72 overflow-auto"},
+        COLS_ORD.map(([col,nome])=>{
+          const idx=sortCols.findIndex(s=>s.col===col); const ativo=idx>=0;
+          return React.createElement("div",{key:col,className:"flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-slate-50"},
+            React.createElement("input",{type:"checkbox",checked:ativo,onChange:()=>toggleCol(col)}),
+            React.createElement("span",{className:"flex-1 cursor-pointer",onClick:()=>toggleCol(col)},nome),
+            ativo && React.createElement("span",{className:"text-[10px] bg-slate-100 rounded px-1.5 py-0.5"},`${idx+1}º`),
+            ativo && React.createElement("button",{type:"button",onClick:()=>inverte(col),className:"text-[11px] border rounded px-2 py-0.5 font-semibold text-[#1e4a8a] bg-white w-[104px]"}, sortCols[idx].dir==="asc"?"↑ Crescente":"↓ Decrescente")
+          );
+        })
+      ),
+      React.createElement("div",{className:"p-2 border-t flex justify-between"},
+        React.createElement("button",{type:"button",onClick:()=>setSortCols(ORD_PADRAO),className:"text-[11px] text-[#1e4a8a] font-semibold"},"Padrão (Data ↓)"),
+        React.createElement("button",{type:"button",onClick:()=>setOpen(false),className:"text-[11px] font-semibold"},"Fechar")
+      )
+    )
+  );
+}
+
+// ===== Descrição: lista suspensa com todos os termos da base + digitação livre =====
+function ComboDescricao({value,onChange,options}){
+  const E=React.createElement;
+  const [open,setOpen]=useState(false);
+  const [todos,setTodos]=useState(false);
+  const ref=useRef(null);
+  useFora(ref,()=>setOpen(false));
+  const q=value.trim().toUpperCase();
+  const vis=(todos||!q)?options:options.filter(o=>o.includes(q));
+  return E("div",{ref,className:"relative"},
+    E("div",{className:"flex"},
+      E("input",{value,onFocus:()=>{setTodos(false);setOpen(true);},onChange:e=>{onChange(e.target.value.toUpperCase());setTodos(false);setOpen(true);},placeholder:"Selecione da lista ou digite um termo novo",autoComplete:"off",className:"flex-1 min-w-0 border rounded-l px-3 py-2.5 mt-1 text-[14px]"}),
+      E("button",{type:"button",onClick:()=>{setTodos(true);setOpen(o=>!o);},className:"mt-1 border border-l-0 rounded-r px-3 bg-white text-[11px]",title:"Ver todas as descrições"},open?"▲":"▼")
+    ),
+    open && E("div",{className:"absolute z-40 left-0 right-0 mt-1 bg-white border rounded shadow-lg max-h-64 overflow-auto"},
+      vis.length===0
+        ? E("div",{className:"p-3 text-[12px] text-slate-500"},"Nenhum termo igual na lista. Ao cadastrar, você poderá incluí-lo como novo.")
+        : vis.map(o=>E("div",{key:o,onClick:()=>{onChange(o);setOpen(false);},className:"px-3 py-2 text-[13px] hover:bg-slate-100 cursor-pointer"},o))
+    )
+  );
+}
+
+// ===== Estatísticas: janela gráfica com filtros pesquisáveis e comparativos =====
+const E_CAMPOS=[["descricao","Descrição"],["viagem","Viagem"],["container","Container"],["status","Status"],["mes","Mês"],["dia","Dia da semana"],["tipo","Crédito/Débito"]];
+const E_MED=[["saldo","Saldo"],["credito","Crédito"],["debitos","Débito"],["qtd","Quantidade"],["media","Média do CD"]];
+const E_TIPOS=[["bar","Barras"],["stack","Barras empilhadas"],["hbar","Barras horizontais"],["line","Linhas"],["pie","Pizza"],["doughnut","Rosca"]];
+const E_PAL=["#1e4a8a","#10b981","#f59e0b","#ef4444","#8b5cf6","#0ea5e9","#ec4899","#64748b","#84cc16","#f97316"];
+const E_SEL="w-full border rounded px-2 py-1.5 text-[12px] bg-white";
+function Estatisticas({dados,onClose}){
+  const E=React.createElement;
+  const [tipo,setTipo]=useState("bar"); const [med,setMed]=useState("saldo");
+  const [grp,setGrp]=useState("mes"); const [cmp,setCmp]=useState("");
+  const [f,setF]=useState({}); const [de,setDe]=useState(""); const [ate,setAte]=useState("");
+  const cv=useRef(null); const chart=useRef(null);
+  const pie=tipo==="pie"||tipo==="doughnut"; const hbar=tipo==="hbar";
+  const kv=(x,k)=>String(x[k]??"").trim()||"(VAZIO)";
+
+  // Base sempre derivada de "dados": toda inclusão atualiza listas, filtros e gráfico
+  const base=useMemo(()=>dados.map(x=>({...x,tipo:(x.cd||0)<0?"DÉBITO":"CRÉDITO",dia:x.dia||diaSemana(x.data)})),[dados]);
+  const opts=useMemo(()=>{
+    const o={};
+    E_CAMPOS.forEach(([k])=>{
+      const u=[...new Set(base.map(x=>x[k]).filter(v=>String(v??"").trim()!==""))];
+      if(k==="mes"){ const t=new Map(); base.forEach(x=>{ const d=new Date(x.data).getTime(); if(x.mes&&(!t.has(x.mes)||d<t.get(x.mes))) t.set(x.mes,d); }); u.sort((a,b)=>t.get(a)-t.get(b)); }
+      else u.sort((a,b)=>String(a).localeCompare(String(b),"pt-BR"));
+      o[k]=u.map(v=>({value:v,label:v}));
+    });
+    return o;
+  },[base]);
+
+  const R=useMemo(()=>base.filter(x=>
+    E_CAMPOS.every(([k])=>!(f[k]&&f[k].length)||casa(f[k],x[k])) &&
+    (!de||new Date(x.data)>=new Date(de)) && (!ate||new Date(x.data)<=new Date(ate+"T23:59:59"))
+  ),[base,f,de,ate]);
+
+  const calc=a=>med==="qtd"?a.length:med==="media"?(a.length?a.reduce((s,x)=>s+(x.cd||0),0)/a.length:0):a.reduce((s,x)=>s+(x[med]||0),0);
+  const fmtV=v=>med==="qtd"?Math.round(v).toLocaleString("pt-BR"):fmtM(v);
+  const ordenar=(k,arr)=>{ const ix=v=>{ const i=(opts[k]||[]).findIndex(o=>o.value===v); return i<0?9999:i; }; return arr.sort((a,b)=>ix(a)-ix(b)||a.localeCompare(b,"pt-BR")); };
+
+  const resumo=useMemo(()=>{
+    const labs=ordenar(grp,[...new Set(R.map(x=>kv(x,grp)))]);
+    const sers=(pie||!cmp)?[null]:ordenar(cmp,[...new Set(R.map(x=>kv(x,cmp)))]);
+    const linhas=labs.map(l=>R.filter(x=>kv(x,grp)===l));
+    const ds=sers.map((s,i)=>({s,i,data:linhas.map(a=>calc(s===null?a:a.filter(x=>kv(x,cmp)===s)))}));
+    return {labs,sers,ds,tot:linhas.map(a=>({v:calc(a),q:a.length}))};
+  },[R,grp,cmp,med,pie,opts]);
+
+  useEffect(()=>{
+    if(chart.current){ chart.current.destroy(); chart.current=null; }
+    if(!cv.current||typeof Chart==="undefined"||!R.length) return;
+    const st=tipo==="stack"; const cor=i=>E_PAL[i%E_PAL.length];
+    const datasets=pie
+      ? [{data:resumo.ds[0].data.map(v=>Math.abs(v)),backgroundColor:resumo.labs.map((_,j)=>cor(j))}]
+      : resumo.ds.map(d=>({label:d.s===null?(E_MED.find(m=>m[0]===med)||[])[1]:d.s,data:d.data,backgroundColor:cor(d.i),borderColor:cor(d.i),tension:.25,fill:false}));
+    const vs={beginAtZero:true,stacked:st,ticks:{callback:v=>fmtV(v)}}; const cs={stacked:st};
+    chart.current=new Chart(cv.current,{
+      type:(tipo==="stack"||hbar)?"bar":tipo,
+      data:{labels:resumo.labs,datasets},
+      options:{responsive:true,maintainAspectRatio:false,indexAxis:hbar?"y":"x",
+        plugins:{legend:{display:pie||resumo.sers.length>1,position:pie?"right":"top"},
+          tooltip:{callbacks:{label:c=>" "+(pie||!c.dataset.label?c.label:c.dataset.label)+": "+fmtV(pie?resumo.ds[0].data[c.dataIndex]:(hbar?c.parsed.x:c.parsed.y))}}},
+        scales:pie?{}:(hbar?{x:vs,y:cs}:{x:cs,y:vs})}
+    });
+  },[resumo,tipo,R.length]);
+  useEffect(()=>()=>{ if(chart.current) chart.current.destroy(); },[]);
+
+  const lbl="text-[11px] font-bold uppercase text-slate-500";
+  const sel=(rotulo,val,set,lista)=>E("div",null,E("label",{className:lbl},rotulo),E("select",{value:val,onChange:e=>set(e.target.value),className:E_SEL+" mt-1"},lista.map(([v,n])=>E("option",{key:v,value:v},n))));
+  const nf=Object.values(f).filter(a=>a&&a.length).length+(de||ate?1:0);
+
+  return E("div",{className:"fixed inset-0 z-50 bg-[#f1f5f9] flex flex-col",style:{height:"100dvh"}},
+    E("div",{className:"flex items-center justify-between gap-3 px-4 py-3 border-b bg-white"},
+      E("h2",{className:"font-bold text-[16px] text-slate-800"},"Estatísticas"),
+      E("button",{onClick:onClose,className:BTN_AZUL+" !px-5"},"Fechar")
+    ),
+    E("div",{className:"flex-1 min-h-0 overflow-auto"},
+    E("div",{className:"bg-white border-b px-4 py-3 flex flex-col gap-3 min-w-[640px]"},
+      E("div",{className:"grid grid-cols-2 lg:grid-cols-4 gap-3"},
+        sel("Tipo de gráfico",tipo,setTipo,E_TIPOS),
+        sel("Medida",med,setMed,E_MED),
+        sel("Agrupar por",grp,setGrp,E_CAMPOS),
+        sel("Comparar por",cmp,setCmp,[["","Nenhum"],...E_CAMPOS])
+      ),
+      E("div",{className:"grid grid-cols-2 lg:grid-cols-5 gap-3"},
+        ...E_CAMPOS.map(([k,n])=>E(MultiSelect,{key:k,label:n,options:opts[k]||[],value:f[k]||[],onChange:v=>setF(o=>({...o,[k]:v})),vazio:k!=="mes"&&k!=="tipo"})),
+        E("div",{className:"flex gap-1"},E("input",{type:"date",value:de,onChange:e=>setDe(e.target.value),className:E_SEL}),E("input",{type:"date",value:ate,onChange:e=>setAte(e.target.value),className:E_SEL})),
+        E("button",{type:"button",onClick:()=>{setF({});setDe("");setAte("");},className:BTN_AZUL+" !py-1.5"},`✕ Limpar filtros (${nf})`)
+      )
+    ),
+    E("div",{className:"p-4 min-w-[640px]"},
+      E("div",{className:"grid grid-cols-3 gap-3 mb-3"},
+        E("div",{className:"bg-white rounded-lg border p-3"},E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"RESULTADO"),E("div",{className:"text-[18px] font-bold text-[#1e4a8a]"},fmtV(calc(R)))),
+        E("div",{className:"bg-white rounded-lg border p-3"},E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"LANÇAMENTOS"),E("div",{className:"text-[18px] font-bold"},R.length)),
+        E("div",{className:"bg-white rounded-lg border p-3"},E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"GRUPOS"),E("div",{className:"text-[18px] font-bold"},resumo.labs.length))
+      ),
+      R.length===0
+        ? E("div",{className:"bg-white rounded-lg border p-8 text-center text-slate-400"},"Nenhum lançamento com os filtros escolhidos. Limpe algum filtro.")
+        : E("div",{className:"grid grid-cols-1 lg:grid-cols-3 gap-3"},
+            E("div",{className:"lg:col-span-2 bg-white rounded-lg border p-3 relative",style:{height:"min(60vh,480px)"}},E("canvas",{ref:cv})),
+            E("div",{className:"bg-white rounded-lg border p-3 overflow-auto",style:{maxHeight:"min(60vh,480px)"}},
+              pie&&E("div",{className:"text-[10px] text-slate-500 mb-2"},"Pizza e rosca usam valores absolutos."),
+              E("table",{className:"w-full text-[12px]"},
+                E("thead",{className:"bg-slate-50 text-[10px] uppercase"},E("tr",null,["Grupo","Valor","Qtd"].map((h,i)=>E("th",{key:h,className:(i?"text-right":"text-left")+" p-2"},h)))),
+                E("tbody",null,resumo.labs.map((l,i)=>E("tr",{key:l,className:"border-t"},E("td",{className:"p-2"},l),E("td",{className:"p-2 text-right font-bold"},fmtV(resumo.tot[i].v)),E("td",{className:"p-2 text-right"},resumo.tot[i].q))))
+              )
+            )
+          )
+    )
+    )
+  );
+}
+
+// Cole aqui a URL do seu Web App do Apps Script terminada em /exec
+// (Implantar > Gerenciar implantações > copiar URL). Necessária para o
+// APK (fora do domínio script.google.com) conseguir ler/gravar no Drive.
+const WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxPXX8KwlajUHEcn8_KXnf6J_lIDHICFPkMYysEiOYapGTHyWS5yYK71T_sa8lBhnO9/exec";
+const PENDENTES_KEY = KEY + "_pendentes";
+
+function temGS(){ return !!(window.google && window.google.script && window.google.script.run); }
+function temWebapp(){ return !!WEBAPP_URL && WEBAPP_URL.indexOf("http") === 0; }
+
+function apiCarregar(){
+  return new Promise((resolve,reject)=>{
+    if (temGS()) {
+      window.google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).buscarUltimaVersao();
+    } else if (temWebapp()) {
+      fetch(WEBAPP_URL + "?action=buscarUltimaVersao")
+        .then(r=>r.json()).then(resolve).catch(reject);
+    } else {
+      reject(new Error("Nenhum backend configurado (defina WEBAPP_URL)."));
+    }
+  });
+}
+
+function apiSalvar(json){
+  return new Promise((resolve,reject)=>{
+    if (temGS()) {
+      window.google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).salvarDados(json);
+    } else if (temWebapp()) {
+      fetch(WEBAPP_URL, {
+        method:"POST",
+        headers:{"Content-Type":"text/plain;charset=utf-8"}, // evita preflight CORS
+        body: JSON.stringify({action:"salvarDados", json: json})
+      }).then(r=>r.json()).then(resolve).catch(reject);
+    } else {
+      reject(new Error("Nenhum backend configurado (defina WEBAPP_URL)."));
+    }
+  });
+}
+
+// Fila offline: tenta reenviar o último salvamento pendente quando a rede voltar.
+function enfileirarPendente(json){ localStorage.setItem(PENDENTES_KEY, json); }
+function limparPendente(){ localStorage.removeItem(PENDENTES_KEY); }
+function tentarReenviarPendente(aviso){
+  const p = localStorage.getItem(PENDENTES_KEY);
+  if (!p) return;
+  apiSalvar(p).then(r=>{
+    if (r && r.status === "OK") { limparPendente(); aviso && aviso("🔄 Sincronizado com o Drive ("+r.qtd+" lançamentos)","ok"); }
+  }).catch(()=>{ /* continua offline, tenta de novo na próxima oportunidade */ });
+}
+window.addEventListener("online", ()=>tentarReenviarPendente());
+
+function App(){
+  const [dados,setDados] = useState(()=>{ try{
+    const s = localStorage.getItem(KEY);
+    if(s){ const j=JSON.parse(s); const arr = Array.isArray(j) ? j : (j.lancamentos||[]); if(arr.length) return arr.map(x=>x.id?x:normaliza(x)); }
+  }catch{} return []; });
+  const [busca,setBusca] = useState("");
+  const [fDesc,setFDesc]=useState([]); const [fViagem,setFViagem]=useState([]);
+  const [fCont,setFCont]=useState([]); const [fStatus,setFStatus]=useState([]); const [fMes,setFMes]=useState([]);
+  const [sortCols,setSortCols]=useState(ORD_PADRAO);
+  const [de,setDe]=useState(""); const [ate,setAte]=useState(""); const [pagina,setPagina]=useState(1);
+  const [edit,setEdit]=useState(null); const [editVal,setEditVal]=useState(""); const editRef=useRef(null);
+  const [showNovo,setShowNovo]=useState(false); const [showStats,setShowStats]=useState(false); const [showDash,setShowDash]=useState(true); const [groupBy,setGroupBy]=useState("descricao");
+  const [isGS,setIsGS]=useState(false);
+  const fileCSV = useRef(null); const fileJSON = useRef(null);
+  const [novo,setNovo]=useState({descricao:"",parc:"1",totalParc:"1",viagem:"VIAGEM",container:"",data:new Date().toISOString().slice(0,10),cd:"",status:"PAGO D"});
+
+  useEffect(()=>{ setIsGS(temGS() || temWebapp()); },[]);
+  useEffect(()=>{ localStorage.setItem(KEY, JSON.stringify(dados)); },[dados]);
+
+  // === CARREGAR ÚLTIMA VERSÃO DO DRIVE (buscarUltimaVersao no Code.gs) ===
+  function carregarDrive(){
+    if(!temGS() && !temWebapp()){ aviso("Offline: defina WEBAPP_URL no HTML ou abra pelo link /exec para carregar do Drive","info"); return; }
+    apiCarregar()
+      .then(r=>{
+        if(r&&r.status==="OK"&&Array.isArray(r.dados)&&r.dados.length){
+          setDados(r.dados.map(x=>x.id?x:{...x,id:newId()}));
+          aviso("✅ Carregado do Drive: "+r.dados.length+" lançamentos ("+r.arquivo+", "+r.atualizadoEm+")","ok");
+        } else if(r&&r.status==="VAZIO"){
+          aviso("Ainda não há arquivo na pasta. Clique em Salvar para criar.","info");
+        } else {
+          aviso("Erro ao carregar: "+(r&&r.erro||"resposta inválida"),"erro");
+        }
+        tentarReenviarPendente(aviso);
+      })
+      .catch(err=>aviso("Falha ao acessar o Drive: "+err.message,"erro"));
+  }
+  useEffect(()=>{ carregarDrive(); },[]);
+
+  const listas = useMemo(()=>{
+    const uniq=k=>[...new Set(dados.map(x=>x[k]).filter(v=>String(v??"").trim()!==""))].sort();
+    const dDesc=uniq("descricao"), dViagem=uniq("viagem"), dCont=uniq("container"), dStatus=uniq("status");
+    const mm=new Map(); dados.forEach(x=>{ const t=new Date(x.data).getTime(); if(x.mes && (!mm.has(x.mes)||t<mm.get(x.mes))) mm.set(x.mes,t); });
+    const dMes=[...mm.keys()].sort((a,b)=>mm.get(a)-mm.get(b));
+    const op=arr=>arr.map(v=>({value:v,label:v}));
+    return {descStr:dDesc,dDesc:op(dDesc),dViagem:op(dViagem),dCont:op(dCont),dStatus:op(dStatus),dMes:op(dMes)};
+  },[dados]);
+
+  const filtrados = useMemo(()=>{
+    let a=[...dados];
+    if(busca.trim()){ const q=busca.toLowerCase(); a=a.filter(x=>Object.values(x).some(v=>String(v).toLowerCase().includes(q))); }
+    if(fDesc.length) a=a.filter(x=>casa(fDesc,x.descricao));
+    if(fViagem.length) a=a.filter(x=>casa(fViagem,x.viagem));
+    if(fCont.length) a=a.filter(x=>casa(fCont,x.container));
+    if(fStatus.length) a=a.filter(x=>casa(fStatus,x.status));
+    if(fMes.length) a=a.filter(x=>casa(fMes,x.mes));
+    if(de){ const t=new Date(de).getTime(); a=a.filter(x=>new Date(x.data).getTime()>=t); }
+    if(ate){ const t=new Date(ate).getTime()+86400000-1; a=a.filter(x=>new Date(x.data).getTime()<=t); }
+    const sc = sortCols.length ? sortCols : ORD_PADRAO;
+    return a.sort((x,y)=>{ for(const s of sc){ const r=cmpCol(x,y,s.col); if(r) return s.dir==="asc"?r:-r; } return 0; });
+  },[dados,busca,fDesc,fViagem,fCont,fStatus,fMes,de,ate,sortCols]);
+
+  const totais = useMemo(()=>{
+    const b=filtrados.length?filtrados:dados;
+    return {cred:b.reduce((s,v)=>s+(v.credito||0),0), deb:b.reduce((s,v)=>s+(v.debitos||0),0), saldo:b.reduce((s,v)=>s+(v.saldo||0),0), count:b.length};
+  },[filtrados,dados]);
+
+  const porMes = useMemo(()=>{
+    const m=new Map(); filtrados.forEach(x=>{ const d=new Date(x.data); const k=isNaN(d)?"":`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; if(!m.has(k)) m.set(k,{cred:0,deb:0,saldo:0,q:0}); const o=m.get(k); o.cred+=x.credito; o.deb+=x.debitos; o.saldo+=x.saldo; o.q++; });
+    return [...m.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([k,o])=>[k?`${k.slice(5)}/${k.slice(0,4)}`:"—",o]);
+  },[filtrados]);
+  const totMes = useMemo(()=>porMes.reduce((t,[,o])=>({cred:t.cred+o.cred,deb:t.deb+o.deb,saldo:t.saldo+o.saldo,q:t.q+o.q}),{cred:0,deb:0,saldo:0,q:0}),[porMes]);
+
+  const compilado = useMemo(()=>{
+    const m=new Map(); filtrados.forEach(x=>{ const k=x[groupBy]||"VAZIO"; if(!m.has(k)) m.set(k,{cred:0,deb:0,saldo:0,q:0}); const o=m.get(k); o.cred+=x.credito; o.deb+=x.debitos; o.saldo+=x.saldo; o.q++; });
+    return [...m.entries()].sort((a,b)=>b[1].saldo-a[1].saldo);
+  },[filtrados,groupBy]);
+
+  const totalPag=Math.ceil(filtrados.length/50)||1;
+  const pagDados=useMemo(()=>filtrados.slice((pagina-1)*50,pagina*50),[filtrados,pagina]);
+  useEffect(()=>{ setPagina(1); },[busca,fDesc,fViagem,fCont,fStatus,fMes,de,ate,sortCols]);
+
+  function salvar(){
+    const json=JSON.stringify(dados);
+    localStorage.setItem(KEY,json);
+    if(temGS() || temWebapp()){
+      apiSalvar(json)
+        .then(r=>{
+          if(r&&r.status==="OK"){ limparPendente(); aviso("✅ Salvo no Drive: "+r.qtd+" lançamentos ("+r.arquivo+")","ok"); }
+          else { enfileirarPendente(json); aviso("Erro ao salvar: "+(r&&r.erro||"resposta inválida")+" — ficará pendente para reenvio.","erro"); }
+        })
+        .catch(err=>{ enfileirarPendente(json); aviso("📴 Sem conexão com o Drive agora. Salvo localmente e será enviado assim que a internet voltar.","info"); });
+    } else {
+      aviso("💾 Salvo só localmente. Defina WEBAPP_URL no HTML para gravar no Drive.","info");
+    }
+  }
+
+  function fecharNovo(){ salvar(); setShowNovo(false); }
+
+  function limparFiltros(){ setBusca(""); setFDesc([]); setFViagem([]); setFCont([]); setFStatus([]); setFMes([]); setDe(""); setAte(""); }
+
+  // === Edição por dois cliques ===
+  function iniciaEdicao(r,col){
+    editRef.current={id:r.id,col};
+    setEdit({id:r.id,col});
+    setEditVal(col==="data"?String(r.data).slice(0,10):String(r[col]??""));
+  }
+  function cancelaEdicao(){ editRef.current=null; setEdit(null); }
+  function commit(val){
+    const e=editRef.current; if(!e) return;
+    editRef.current=null; setEdit(null);
+    const {id,col}=e;
+    const atual=dados.find(x=>x.id===id);
+    if(atual){ const orig=col==="data"?String(atual.data).slice(0,10):String(atual[col]??""); if(String(val)===orig) return; }
+    let v=val;
+    if(col==="cd"){ v=parseNum(val); if(Number.isNaN(v)){ aviso("Valor inválido: "+val,"erro"); return; } }
+    if(col==="data" && !val){ aviso("Data inválida","erro"); return; }
+    setDados(ds=>ds.map(r=>r.id!==id ? r : normaliza({...r,[col]:v})));
+  }
+  function campoEdicao(col){
+    const base={autoFocus:true,onKeyDown:e=>{ if(e.key==="Enter") commit(e.target.value); else if(e.key==="Escape") cancelaEdicao(); },className:"border border-[#1e4a8a] rounded px-1 py-0.5 text-[12px] bg-white",style:{minWidth:col==="descricao"?170:90}};
+    if(col==="status"){
+      const ops=STATUS_OPC.includes(editVal)?STATUS_OPC:[...STATUS_OPC,editVal];
+      return React.createElement("select",{...base,value:editVal,onChange:e=>commit(e.target.value),onBlur:cancelaEdicao},ops.map(s=>React.createElement("option",{key:s,value:s},s||"(VAZIO)")));
+    }
+    return React.createElement("input",{...base,type:col==="data"?"date":"text",value:editVal,onChange:e=>setEditVal(e.target.value),onBlur:e=>commit(e.target.value)});
+  }
+  function celula(r,col,cls,conteudo){
+    if(edit && edit.id===r.id && edit.col===col) return React.createElement("td",{key:col,className:"sheet-td"},campoEdicao(col));
+    return React.createElement("td",{key:col,className:cls,style:{touchAction:"manipulation"},title:"Dois cliques para editar",onDoubleClick:()=>iniciaEdicao(r,col)},conteudo);
+  }
+
+  function clickHeader(col){
+    if(sortCols.length===1 && sortCols[0].col===col) setSortCols([{col,dir:sortCols[0].dir==="asc"?"desc":"asc"}]);
+    else setSortCols([{col,dir:"asc"}]);
+  }
+
+  function adicionar(){
+    const desc=novo.descricao.trim().toUpperCase();
+    if(!desc||!novo.cd){ alert("Descrição e valor obrigatórios"); return; }
+    if(!listas.descStr.includes(desc)){
+      if(!confirm(`O termo "${desc}" não existe na lista de descrições.\n\nDeseja incluí-lo como novo na base de dados?`)) return;
+    }
+    const total=Math.max(1,parseInt(novo.totalParc)||1); const base=new Date(novo.data); const valor=Number(String(novo.cd).replace(",","."))||0;
+    const novos=[];
+    for(let i=0;i<total;i++){ const d=new Date(base); d.setDate(d.getDate()+i*30); novos.push(normaliza({id:newId(), descricao:desc, parc:total>1?`${i+1}/${total}`:novo.parc, viagem:novo.viagem, container:novo.container, data:d.toISOString(), cd:valor, status:novo.status})); }
+    setDados(v=>[...novos,...v]); setShowNovo(false); setNovo({descricao:"",parc:"1",totalParc:"1",viagem:"VIAGEM",container:"",data:new Date().toISOString().slice(0,10),cd:"",status:"PAGO D"});
+  }
+
+  function exportCSV(){
+    const cols=["descricao","parc","viagem","container","data","cd","status","dia","mes","credito","debitos","saldo"];
+    const linhas=filtrados.map(x=>cols.map(c=>`"${String(x[c]??"").replace(/"/g,'""')}"`).join(";"));
+    const csv=[cols.join(";"),...linhas].join("\n");
+    const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`controle_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+  }
+  function exportJSON(){
+    const blob=new Blob([JSON.stringify(filtrados,null,2)],{type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`controle_${new Date().toISOString().slice(0,10)}.json`; a.click();
+  }
+
+  function onImportCSV(e){
+    const file=e.target.files?.[0]; if(!file) return; const reader=new FileReader();
+    reader.onload=()=>{ try{
+      const lines=String(reader.result).split(/\r?\n/).filter(l=>l.trim()); if(!lines.length) return;
+      const header=lines[0].split(";").map(h=>h.replace(/"/g,"").toLowerCase()); const idx=n=>header.indexOf(n);
+      const novos=[];
+      for(let i=1;i<lines.length;i++){
+        const cols=lines[i].split(";").map(c=>c.replace(/^"|"$/g,""));
+        const get=k=>cols[idx(k)]||""; const item=normaliza({id:newId(), descricao:get("descricao")||cols[0], parc:get("parc")||"0", viagem:get("viagem")||"DINHEIRO", container:get("container")||"", data:get("data")||new Date().toISOString(), cd:Number((get("cd")||cols[5]||"0").replace(",",".")), status:get("status")||""});
+        novos.push(item);
+      }
+      setDados(v=>[...novos,...v]); alert(novos.length+" linhas CSV importadas");
+    }catch(err){ alert("Erro CSV: "+err); } if(fileCSV.current) fileCSV.current.value=""; };
+    reader.readAsText(file,"utf-8");
+  }
+
+  function onImportJSON(e){
+    const file=e.target.files?.[0]; if(!file) return; const reader=new FileReader();
+    reader.onload=()=>{ try{
+      const j=JSON.parse(String(reader.result));
+      const arr = Array.isArray(j) ? j : (j.lancamentos||j.dados||[]);
+      if(!arr.length) throw "JSON vazio ou formato inválido";
+      const novos = arr.map(x=>normaliza(x));
+      setDados(v=>[...novos,...v]);
+      alert(novos.length+" registros JSON importados");
+    }catch(err){ alert("Erro JSON: "+err); } if(fileJSON.current) fileJSON.current.value=""; };
+    reader.readAsText(file,"utf-8");
+  }
+
+  const E=React.createElement;
+
+  return E("div",{className:"min-h-screen"},
+    showStats && E(Estatisticas,{dados,onClose:()=>setShowStats(false)}),
+    E("header",{className:"bg-[#1e4a8a] text-white sticky top-0 z-30 shadow"},
+      E("div",{className:"max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3"},
+        E("div",{className:"flex items-center gap-3"},
+          E("div",{className:"w-9 h-9 bg-white text-[#1e4a8a] rounded font-black flex items-center justify-center"},"≡"),
+          E("div",null,
+            E("h1",{className:"font-bold text-[17px] leading-none"},"CONTROLE DE CUSTOS"),
+            E("p",{className:"text-[11px] opacity-80 mt-1"}, `${dados.length} lançamentos • ${isGS?"Apps Script conectado":"Offline / Drive JSON"} • ${new Date().toLocaleDateString("pt-BR")}`)
+          )
+        ),
+        E("div",{className:"flex items-center gap-2"},
+          E("button",{onClick:()=>setShowStats(true),className:"bg-white/15 px-3 py-1.5 rounded text-[12px]"},"📊 Estatísticas"),
+          E("button",{onClick:()=>setShowDash(!showDash),className:"bg-white/15 px-3 py-1.5 rounded text-[12px]"},"Dashboard"),
+          E("button",{onClick:carregarDrive,className:"bg-white/15 px-3 py-1.5 rounded text-[12px]"},"⬇ Carregar Drive"),
+          E("button",{onClick:salvar,className:"bg-emerald-500 hover:bg-emerald-600 px-4 py-1.5 rounded font-bold text-[12px]"},"💾 Salvar")
+        )
+      )
+    ),
+    E("div",{className:"max-w-[1600px] mx-auto px-4 py-6"},
+      E("div",{id:"fb",className:"hidden"}),
+      E("div",{className:"grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"},
+        E("div",{className:"bg-white rounded-lg border p-3"}, E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"RECEITA"), E("div",{className:"text-[18px] font-bold text-emerald-600"}, fmtM(totais.cred))),
+        E("div",{className:"bg-white rounded-lg border p-3"}, E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"CRÉDITO"), E("div",{className:"text-[18px] font-bold text-emerald-600"}, fmtM(totais.cred))),
+        E("div",{className:"bg-white rounded-lg border p-3"}, E("div",{className:"text-[10px] font-bold text-slate-500 tracking-widest"},"DÉBITO"), E("div",{className:"text-[18px] font-bold text-rose-600"}, fmtM(totais.deb))),
+        E("div",{className:"bg-[#1e4a8a] rounded-lg border p-3 text-white"}, E("div",{className:"text-[10px] font-bold opacity-70 tracking-widest"},"SALDO"), E("div",{className:"text-[18px] font-bold"}, fmtM(totais.saldo)))
+      ),
+      E("div",{className:"mt-6 bg-white rounded-lg border p-4 flex flex-col gap-3"},
+        E("div",{className:"flex flex-wrap gap-2 items-center"},
+          E("div",{className:"flex-1 min-w-[220px] relative"},
+            E("input",{value:busca,onChange:e=>setBusca(e.target.value),placeholder:"🔎 Busca geral...",className:"w-full pl-3 pr-3 py-2 rounded border bg-slate-50 text-[13px]"})
+          ),
+          // Ordem: Novo, Exportar CSV, Exportar JSON, Importar CSV, Upload JSON, Excluir (por último)
+          E("button",{onClick:()=>setShowNovo(true),className:BTN_AZUL},"+ Novo"),
+          E("button",{onClick:exportCSV,className:BTN_AZUL},"Exportar CSV"),
+          E("button",{onClick:exportJSON,className:BTN_AZUL},"Exportar JSON"),
+          E("label",{className:BTN_AZUL}, "Importar CSV", E("input",{ref:fileCSV,type:"file",accept:".csv",onChange:onImportCSV,className:"hidden"})),
+          E("label",{className:"bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-[12px] cursor-pointer font-semibold"}, "📤 Upload JSON", E("input",{ref:fileJSON,type:"file",accept:".json,application/json",onChange:onImportJSON,className:"hidden"}))
+        ),
+        E("div",{className:"grid grid-cols-2 lg:grid-cols-6 gap-3"},
+          E(MultiSelect,{label:"Descrição",options:listas.dDesc,value:fDesc,onChange:setFDesc}),
+          E(MultiSelect,{label:"Viagem",options:listas.dViagem,value:fViagem,onChange:setFViagem}),
+          E(MultiSelect,{label:"Container",options:listas.dCont,value:fCont,onChange:setFCont}),
+          E(MultiSelect,{label:"Status",options:listas.dStatus,value:fStatus,onChange:setFStatus}),
+          E(MultiSelect,{label:"Mês",options:listas.dMes,value:fMes,onChange:setFMes,vazio:false}),
+          E("div",{className:"flex gap-1"}, E("input",{type:"date",value:de,onChange:e=>setDe(e.target.value),className:"border rounded px-2 py-1.5 text-[12px] w-full"}), E("input",{type:"date",value:ate,onChange:e=>setAte(e.target.value),className:"border rounded px-2 py-1.5 text-[12px] w-full"}))
+        ),
+        E("div",{className:"flex flex-wrap items-center justify-between gap-2"},
+          E("div",{className:"text-[11px] text-slate-500"}, `${filtrados.length} de ${dados.length} • Página ${pagina}/${totalPag} • Ordem: ${resumoOrd(sortCols.length?sortCols:ORD_PADRAO)} • Dois cliques na célula para editar`),
+          E("div",{className:"flex items-center gap-2"},
+            E("button",{type:"button",onClick:limparFiltros,className:BTN_AZUL+" !py-1.5"},"✕ Limpar filtros"),
+            E(SortPanel,{sortCols,setSortCols})
+          )
+        )
+      ),
+      showDash && E("div",{className:"mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3"},
+        E("div",{className:"lg:col-span-2 bg-white rounded-lg border p-3"},
+          E("h3",{className:"font-bold text-[11px] uppercase tracking-widest mb-2"},"Totais por mês"),
+          E("div",{className:"overflow-auto max-h-[220px] border rounded"},
+            E("table",{className:"w-full text-[12px]"},
+              E("thead",{className:"bg-slate-50 text-[10px] uppercase"}, E("tr",null, ["Mês (mm/aaaa)","Crédito","Débito","Saldo","Qtd"].map((h,i)=>E("th",{key:h,className:(i===0?"text-left":"text-right")+" p-2"},h)))),
+              E("tbody",null, porMes.map(([mes,o])=>E("tr",{key:mes,className:"border-t"},
+                E("td",{className:"p-2 font-medium"},mes),
+                E("td",{className:"p-2 text-right text-emerald-600"},fmtM(o.cred)),
+                E("td",{className:"p-2 text-right text-rose-600"},fmtM(o.deb)),
+                E("td",{className:"p-2 text-right font-bold"},fmtM(o.saldo)),
+                E("td",{className:"p-2 text-right"},o.q)
+              ))),
+              E("tfoot",null, E("tr",{className:"border-t-2"},
+                E("td",{className:"p-2 font-bold sticky bottom-0 bg-slate-100"},"Total"),
+                E("td",{className:"p-2 text-right font-bold text-emerald-700 sticky bottom-0 bg-slate-100"},fmtM(totMes.cred)),
+                E("td",{className:"p-2 text-right font-bold text-rose-700 sticky bottom-0 bg-slate-100"},fmtM(totMes.deb)),
+                E("td",{className:"p-2 text-right font-bold sticky bottom-0 bg-slate-100"},fmtM(totMes.saldo)),
+                E("td",{className:"p-2 text-right font-bold sticky bottom-0 bg-slate-100"},totMes.q)
+              ))
+            )
+          )
+        ),
+        E("div",{className:"bg-white rounded-lg border p-3"},
+          E("div",{className:"flex gap-1 mb-2"}, ["descricao","viagem","mes","status"].map(k=>E("button",{key:k,onClick:()=>setGroupBy(k),className:`px-2 py-1 rounded text-[11px] border ${groupBy===k?"bg-[#1e4a8a] text-white":"bg-white"}`},k))),
+          E("div",{className:"overflow-auto max-h-[220px] border rounded"},
+            E("table",{className:"w-full text-[11px]"},
+              E("thead",{className:"bg-slate-50"}, E("tr",null, ["Grupo","Saldo","Qtd"].map(h=>E("th",{key:h,className:"p-2 text-left"},h)))),
+              E("tbody",null, compilado.slice(0,20).map(([k,v])=>E("tr",{key:k,className:"border-t"}, E("td",{className:"p-2 truncate max-w-[150px]"},k), E("td",{className:"p-2 text-right font-bold"},fmtM(v.saldo)), E("td",{className:"p-2 text-right"},v.q))))
+            )
+          )
+        )
+      ),
+      E("div",{className:"mt-4 bg-white rounded-lg border overflow-hidden"},
+        E("div",{className:"overflow-auto max-h-[65vh]"},
+          E("table",{className:"w-full border-collapse",style:{minWidth:"1000px"}},
+            E("thead",null, E("tr",null, [
+              ...COLS_ORD.map(([col,nome])=>{
+                const i=sortCols.findIndex(s=>s.col===col);
+                const seta=i>=0?(sortCols[i].dir==="asc"?" ↑":" ↓")+(sortCols.length>1?` ${i+1}`:""):"";
+                return E("th",{key:col,className:"sheet-th sortable",onClick:()=>clickHeader(col),title:"Clique para ordenar"},nome+seta);
+              }),
+              E("th",{key:"acoes",className:"sheet-th"},"Ações")
+            ])),
+            E("tbody",null, pagDados.map(r=>E("tr",{key:r.id,className:"zebra"},
+              celula(r,"descricao","sheet-td font-medium",r.descricao),
+              celula(r,"parc","sheet-td font-medium",r.parc),
+              celula(r,"viagem","sheet-td font-medium",r.viagem),
+              celula(r,"container","sheet-td font-medium",r.container),
+              celula(r,"data","sheet-td",fmtBR(r.data)),
+              celula(r,"cd",`sheet-td font-bold ${r.cd>=0?"text-emerald-700":"text-rose-700"}`,fmtM(r.cd)),
+              celula(r,"status","sheet-td",r.status),
+              E("td",{className:"sheet-td"}, r.mes),
+              E("td",{className:"sheet-td font-bold"}, fmtM(r.saldo)),
+              E("td",{className:"sheet-td"}, E("button",{onClick:()=>{ if(!confirm("Excluir?")) return; setDados(d=>d.filter(x=>x.id!==r.id)); },className:"text-rose-600 text-[11px]"},"Excluir"))
+            )))
+          )
+        ),
+        pagDados.length===0 && E("div",{className:"p-8 text-center text-slate-400"}, "Nenhum lançamento. Use Upload JSON ou Importar CSV."),
+        E("div",{className:"flex items-center justify-between p-3 border-t bg-slate-50"},
+          E("span",{className:"text-[11px]"}, `${pagDados.length} linhas`),
+          E("div",{className:"flex gap-1"},
+            E("button",{disabled:pagina<=1,onClick:()=>setPagina(p=>Math.max(1,p-1)),className:"px-3 py-1 rounded border bg-white disabled:opacity-40 text-[12px]"},"‹ Anterior"),
+            E("span",{className:"text-[11px] px-2"}, `${pagina}/${totalPag}`),
+            E("button",{disabled:pagina>=totalPag,onClick:()=>setPagina(p=>Math.min(totalPag,p+1)),className:"px-3 py-1 rounded border bg-white disabled:opacity-40 text-[12px]"},"Próxima ›")
+          )
+        )
+      )
+    ),
+    // Novo Lançamento: tela cheia (celular e desktop), só "Fechar" no topo; Fechar salva antes de encerrar
+    showNovo && E("div",{className:"fixed inset-0 z-50 bg-white flex flex-col",style:{height:"100dvh"}},
+      E("div",{className:"flex items-center justify-between gap-3 px-4 py-3 border-b bg-white"},
+        E("h2",{className:"font-bold text-[16px] text-slate-800"},"Novo Lançamento"),
+        E("button",{onClick:fecharNovo,className:BTN_AZUL+" !px-5"},"Fechar")
+      ),
+      E("div",{className:"flex-1 overflow-auto"},
+        E("div",{className:"max-w-[900px] mx-auto p-4 grid grid-cols-1 md:grid-cols-2 gap-4"},
+          E("div",{className:"md:col-span-2"}, E("label",{className:campoLbl},"Descrição"), E(ComboDescricao,{value:novo.descricao,onChange:v=>setNovo(n=>({...n,descricao:v})),options:listas.descStr})),
+          E("div",null, E("label",{className:campoLbl},"Total parcelas"), E("input",{type:"number",value:novo.totalParc,onChange:e=>setNovo({...novo,totalParc:e.target.value}),className:campoIn})),
+          E("div",null, E("label",{className:campoLbl},"Container"), E("input",{value:novo.container,onChange:e=>setNovo({...novo,container:e.target.value.toUpperCase()}),className:campoIn})),
+          E("div",null, E("label",{className:campoLbl},"Data"), E("input",{type:"date",value:novo.data,onChange:e=>setNovo({...novo,data:e.target.value}),className:campoIn})),
+          E("div",null, E("label",{className:campoLbl},"Valor CD"), E("input",{value:novo.cd,onChange:e=>setNovo({...novo,cd:e.target.value}),placeholder:"-24 ou 1500",className:campoIn})),
+          E("div",null, E("label",{className:campoLbl},"Status"), E("select",{value:novo.status,onChange:e=>setNovo({...novo,status:e.target.value}),className:campoIn}, ["PAGO D","PAGO C","PENDENTE",""].map(s=>E("option",{key:s,value:s},s||"(VAZIO)")))),
+          E("div",null, E("label",{className:campoLbl},"Viagem"), E("select",{value:novo.viagem,onChange:e=>setNovo({...novo,viagem:e.target.value}),className:campoIn}, (listas.dViagem.some(o=>o.value===novo.viagem)?listas.dViagem:[...listas.dViagem,{value:novo.viagem,label:novo.viagem}]).map(o=>E("option",{key:o.value,value:o.value},o.label)))),
+          E("div",{className:"md:col-span-2 pt-2"}, E("button",{onClick:adicionar,className:BTN_AZUL+" w-full !py-3 !text-[14px]"},"Cadastrar"))
+        )
+      )
+    )
+  );
+}
+createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
